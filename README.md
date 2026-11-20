@@ -77,5 +77,28 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 解析版本流水线（配置改动下的抽取一致性）
+
+DOM 解析配置改动时，通过 `/api/pipeline/*` 接口保证实体抽取结果可追溯、冲突可裁决：
+
+- **解析版本清单**（`parse_versions`）：每次登记解析配置生成不可变版本，含配置签名、
+  字段集合与「可消费/已替换」标记，同页面旧版本自动让位，同签名重复登记幂等。
+- **抽取批次**（`extraction_batches`）：每次抽取运行启动时固定解析版本ID、签名与生效字段；
+  交付结果写入带来源的实体版本数据集（`entity_versions`），并回写主实体表与页面游标。
+- **版本冲突**：旧配置抽取在途、新配置先交付不同字段时，按 `fresh_first`（交付时效优先，
+  直接接纳）或 `pending_first`（既有待处理优先，挂起待裁决）处理；冲突批次可通过
+  `resolve-conflict` 人工接纳/废弃，也可 `redeliver` 重投。
+- **回执去重**：同一运行同一 `replay_key` 的并发提交只保留首次回执（全局锁保护）。
+- **发布不可变**：`publish` 校验快照字段合计与解析版本一致后冻结，已发布批次拒绝重投，
+  但仍按原版本读取，配置记录与结果一起落库。
+- **图谱建边**：`graph/build-from-batch` 只采用批次生效字段，边记录版本、签名与字段集合，
+  可通过 `graph/edge-provenance` 追溯。
+- **页面刷新核对**：`extraction/pages/{uri}/refresh` 返回新旧版本明细、当前实体集、
+  各批次引用的版本与全部回执。
+
+前端「版本流水线」导航（`/pipeline`，`PipelineView.vue`）提供上述流程的可视化操作。
+后端测试：`backend/tests/test_pipeline_e2e.py`（HTTP 端到端，需先启动服务）与
+`backend/tests/test_concurrency_regression.py`（并发与旧链路回归，直接运行即可）。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

@@ -7,6 +7,22 @@ from __future__ import annotations
 from typing import Any
 
 from app.seed import SEED_ROWS
+from app.services.versioning import (
+    ENTITY_VERSION_TABLE,
+    EXTRACTION_BATCH_TABLE,
+    EXTRACTION_CURSOR_TABLE,
+    EXTRACTION_RECEIPT_TABLE,
+    PARSE_VERSION_TABLE,
+)
+
+# 版本化流水线使用的新表：不带示例数据，随服务启动一起建空。
+VERSION_TABLES = (
+    PARSE_VERSION_TABLE,
+    EXTRACTION_BATCH_TABLE,
+    ENTITY_VERSION_TABLE,
+    EXTRACTION_RECEIPT_TABLE,
+    EXTRACTION_CURSOR_TABLE,
+)
 
 
 class Store:
@@ -14,6 +30,8 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        for table in VERSION_TABLES:
+            self._tables.setdefault(table, [])
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)

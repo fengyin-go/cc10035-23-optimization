@@ -5,6 +5,13 @@ import hashlib
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.versioning import (
+    ENTITY_VERSION_TABLE,
+    EXTRACTION_BATCH_TABLE,
+    PIPELINE_LOCK,
+    next_id,
+    now_iso,
+)
 from app.store import store
 
 
@@ -59,6 +66,76 @@ class RelationGraphService(BaseModuleService):
             "relation_types_used": list(set(r["关系类型"] for r in relations)),
         }
 
+    def build_relations_from_batch(self, run_id: str) -> dict[str, Any]:
+        """沿数据流消费已发布/已交付批次的实体版本数据集建边。
+
+        建边只使用该批次实际生效的字段集合，边记录解析版本与签名，
+        保证图谱侧也能追溯每条边采用过的解析字段。
+        """
+        with PIPELINE_LOCK:
+            batch = next(
+                (b for b in store.rows(EXTRACTION_BATCH_TABLE) if b["run_id"] == run_id),
+                None,
+            )
+            if batch is None:
+                return {"ok": False, "reason": f"抽取运行 {run_id} 不存在"}
+            snapshot = [
+                row for row in store.rows(ENTITY_VERSION_TABLE) if row["run_id"] == run_id
+            ]
+            if not snapshot:
+                return {"ok": False, "reason": "该批次没有实体版本数据，无法建边"}
+            records = [
+                {
+                    "实体ID": row["entity_id"],
+                    "实体类型": row["entity_type"],
+                    "实体名称": row["entity_name"],
+                    "页面来源": row["source_uri"],
+                }
+                for row in snapshot
+            ]
+            built = self.build_relations(records)
+            if not built["ok"]:
+                return built
+            table = store.rows(self.MODULE)
+            created = []
+            for relation in built["relations"]:
+                relation.update({
+                    "解析版本ID": batch["parse_version_id"],
+                    "解析签名": batch["config_signature"],
+                    "来源运行ID": run_id,
+                    "生效字段": list(batch["active_fields"]),
+                    "建边时间": now_iso(),
+                })
+                entry = {"id": next_id(table), "status": "已抽取", "pending": True, "abnormal": False}
+                entry.update(relation)
+                table.append(entry)
+                created.append(dict(entry))
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "parse_version_id": batch["parse_version_id"],
+            "config_signature": batch["config_signature"],
+            "active_fields": list(batch["active_fields"]),
+            "relation_count": len(created),
+            "relations": created,
+        }
+
+    def edge_provenance(self) -> list[dict[str, Any]]:
+        """图谱建边采用的字段集合：逐条边回显版本、签名与生效字段。"""
+        with PIPELINE_LOCK:
+            return [
+                {
+                    "边ID": row.get("边ID"),
+                    "解析版本ID": row.get("解析版本ID"),
+                    "解析签名": row.get("解析签名"),
+                    "来源运行ID": row.get("来源运行ID"),
+                    "生效字段": row.get("生效字段", []),
+                    "抽取页面": row.get("抽取页面"),
+                }
+                for row in store.rows(self.MODULE)
+                if row.get("来源运行ID")
+            ]
+
     def feed_knowledge_link(self, relation_ids: list[str]) -> dict[str, Any]:
         """将已验证的关系提供给知识链接模块。"""
         relations = []
@@ -100,4 +177,5 @@ class RelationGraphService(BaseModuleService):
     def domain_snapshot(self) -> dict[str, Any]:
         base = super().domain_snapshot()
         base["graph_stats"] = self.compute_graph_stats()
+        base["provenanced_edges"] = len(self.edge_provenance())
         return base
